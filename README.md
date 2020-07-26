@@ -2,6 +2,10 @@
 
 Automaton inference from examples using z3py
 
+## Future work
+
+To be added soon: negative examples.
+
 ## Related work
 
 [z3gi][1]
