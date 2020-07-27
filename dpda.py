@@ -44,7 +44,25 @@ def Sequence(name, ctx=None):
                        z3.SeqSortRef(z3.Z3_mk_seq_sort(int_sort.ctx_ref(), int_sort.ast)).ast),
         ctx)
 
+def shortlex(alphabet, prefix=b''):
+    """
+    Enumerate all strings over alphabet in shortlex order
+    """
+    assert(len(alphabet))
 
+    iters = []
+
+    for a in alphabet:
+        iters += [shortlex(alphabet, prefix=prefix+bytes([a]))]
+
+    yield prefix
+
+    while iters != []:
+        for x in iters:
+            try:
+                yield next(x)
+            except StopIteration:
+                iters.remove(x)
 
 class InfoTrie:
     """
@@ -98,6 +116,12 @@ class InfoTrie:
         this means the node has descendants with info != None
         """
         return len(self.dict) > 0
+
+    def first_word_not_in(self, alphabet):
+        '''
+        (by shortlex)
+        '''
+        return next(itertools.filterfalse(lambda w: self.get(w) != None, shortlex(alphabet)))
 
 
 class Automaton:
@@ -243,7 +267,6 @@ class Automaton:
         Short-Lex enumeration of L (or \Sigma^\ast - L),
         @param trie exclude these words
         """
-        # print("enumerate on |alph|=%d configurations_prefixes %s" % (len(alphabet), configurations_prefixes))
 
         successors = {}
 
@@ -472,7 +495,7 @@ if __name__=='__main__':
         t = InfoTrie()
 
         # arbitrarily limit number of state/stack symbols
-        limitS = 6
+        limitS = 5
         # arbitrarily limit length of suffix added in any stack operation
         limitL = 2
 
@@ -498,46 +521,62 @@ if __name__=='__main__':
             a = Automaker(t, limitS, limitL)
             a.setupProblem()
 
+            question = None
             prompt = "dPDA wizard :> "
+            
             if len(files) < 1:
                 print (prompt, end='', flush=True)
-
+                
             for l in fileinput.input(files, mode='rb'):
                 inp = None
                 
                 # assert a positive example:
                 if l[0] == b'p'[0] or l[0] == b'y'[0]:
                     inp = unescape(l[2:-1])
+                    if question != None and not inp:
+                        inp = question
+                        question = None
                     pol = True
-                    
+                
                 # assert a negative example:
                 elif l[0] == b'n'[0] or l[0] == b'n'[0]:
                     inp = unescape(l[2:-1])
+                    if question != None and not inp:
+                        inp = question
+                        question = None
                     pol = False
   
                 # query
                 elif l[0] == b'?'[0]:
                     print ("asking Z3")
-                    a.askZ3()
+                    sat = a.askZ3()
                     
                     # ...
                     # print(a.automaton.D)
                     # print(a.automaton.QF)
 
-                    checkalph = List(inputalph)
-                    print ("here's some words (alphabet %s)" % checkalph)
-                    try:
-                        en = a.enumerate_words_t(checkalph, b"")
-                        for w in itertools.islice(en, 0, 14):
-                            print (w)
-                    except StopIteration:
-                        print ("oops, language is not infinite")
-                    except RecursionError:
-                        print ("RecursionError (this is a bug)")
+                    if sat:
+                        checkalph = List(inputalph)
+                        print ("here's some words (alphabet %s)" % checkalph)
+                        try:
+                            en = a.enumerate_words_t(checkalph, b"")
+                            for w in itertools.islice(en, 0, 14):
+                                print (w)
+                        except StopIteration:
+                            print ("oops, language is not infinite")
+                        except RecursionError:
+                            print ("RecursionError (this is a bug)")
+                            
+                        question = t.first_word_not_in(checkalph)
+                        
 
                 # quit
                 elif l[0] == b'q'[0]:
                     exit(0)
+                    
+                elif l[0] == b's'[0]:
+                    limitS = int(l[2:])
+                    print ("number of internal symbols set to %d" % limitS)
                 
                 # process input in case of assertion
                 if inp != None:
@@ -549,6 +588,14 @@ if __name__=='__main__':
                     a = Automaker(t, limitS, limitL)
                     a.setupProblem()
                     a.set_alphabet(inputalph)
+                    
+                if len(files) < 1:
+                    if question == None:
+                        prompt = "dPDA wizard :> "
+                    else:
+                        prompt = "%s? :>" % repr(question)
+                    print (prompt, end='', flush=True)
+                
                 
 
     except KeyboardInterrupt as e:
