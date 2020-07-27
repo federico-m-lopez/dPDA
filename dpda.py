@@ -57,9 +57,16 @@ class InfoTrie:
         @return iterate over the trie, depth-first, outputting all nodes.
         @param prefix optional
         """
-        yield (prefix, self, self.info)
+        yield (prefix, self, self.info, self.has_children())
         for (k,v) in self.dict.items():
             yield from v.iter(b"%s%s" % (prefix, bytes([k])))
+
+    def has_children(self):
+        """
+        Assuming the invariant that only inner nodes have info == None,
+        this means the node has descendants with info != None
+        """
+        return len(self.dict) > 0
 
 
 class Automaton:
@@ -132,6 +139,17 @@ class Automaton:
 
         self.symbols = symbols
 
+###############
+#  Utilities  #
+###############
+
+def unescape(bs):
+    try:
+        result = bs.decode('unicode_escape').encode('latin-1')
+        return result
+    except UnicodeDecodeError as e:
+        print ("error", e)
+        return None
 
 # C'mon, python, seriously?
 class List(list):
@@ -170,7 +188,7 @@ class Automaker:
         self.limitL = limitL
 
 
-    def limit_alphabet(self, alphabet):
+    def set_alphabet(self, alphabet):
         self.alphabet = alphabet
 
     def addPath(self, prefix, rest, final):
@@ -191,11 +209,15 @@ class Automaker:
         self.Qf = z3.Function("final", z3.SeqSort(z3.IntSort()), z3.BoolSort())
         self.d = z3.Function("delta", z3.SeqSort(z3.IntSort()), z3.StringSort(), z3.SeqSort(z3.IntSort()))
  
-        for (w, st, final) in self.t.iter():
+        for (w, st, final, has_children) in self.t.iter():
+
             sv = b"stack" + base64.b16encode(w)
             self.stackvars[w] = Sequence(sv)
 
             self.s_add_finalstate(w, final)
+
+            if final and has_children:
+                self.s_add_nonemptystate(w)
 
             if len(w):
                 self.s_add_transition_to(w)
@@ -225,6 +247,10 @@ class Automaker:
             self.s.add(isFinal)
         elif final == False:
             self.s.add(z3.Not(isFinal))
+
+    def s_add_nonemptystate(self, w):
+        z3var = self.stackvars[w]
+        self.s.add(z3.Not(z3.Length(z3var)==0))
 
     def s_add_transition_to(self, w):
         """
@@ -308,10 +334,10 @@ class TrieTest(unittest.TestCase):
         self.assertEqual(t.get(b'a'), True)
         self.assertEqual(t.get(b'ah'), True)
         self.assertEqual(t.get(b'ad'), None)
-        self.assertEqual(len([_ for (_,_,info) in t.iter() if info]), 4)
-        self.assertEqual(len([_ for (_,_,_) in t.iter()]), 5)
-        self.assertEqual(len([_ for (_,_,info) in t.iter(b'a') if info]), 4)
-        self.assertEqual(len([_ for (_,_,_) in t.iter(b'a')]), 5)
+        self.assertEqual(len([_ for (_,_,info,_) in t.iter() if info]), 4)
+        self.assertEqual(len([_ for (_,_,_,_) in t.iter()]), 5)
+        self.assertEqual(len([_ for (_,_,info,_) in t.iter(b'a') if info]), 4)
+        self.assertEqual(len([_ for (_,_,_,_) in t.iter(b'a')]), 5)
 
 
 ##################
@@ -354,13 +380,50 @@ if __name__=='__main__':
                 t.add(l[:-1], True)
                 inputalph = inputalph.union(l[:-1])
 
-                print(b"; ".join([w for (w, st, info) in t.iter()]))
-                print("; ".join(['(%s,%s)' % (w, pprint.saferepr(i)) for (w, st, i) in t.iter()]))
+                print(b"; ".join([w for (w, st, info, has_children) in t.iter()]))
+                print("; ".join(['(%s,%s)' % (w, pprint.saferepr(i)) for (w, st, i, has_children) in t.iter()]))
                 a = Automaker(t, limitS, limitL)
                 a.setupProblem()
-                a.limit_alphabet(inputalph)
+                a.set_alphabet(inputalph)
                 a.askZ3()
+
+        elif mode == 'advanced':
+
+            a = Automaker(t, limitS, limitL)
+            a.setupProblem()
+
+            prompt = "dPDA wizard :> "
+            if len(files) < 1:
+                print (prompt, end='', flush=True)
+
+            for l in fileinput.input(files, mode='rb'):
+                inp = None
+                # positive example:
+                if l[0] == b'p'[0] or l[0] == b'y'[0]:
+                    inp = unescape(l[2:-1])
+                    pol = True
+                elif l[0] == b'n'[0] or l[0] == b'n'[0]:
+                    inp = unescape(l[2:-1])
+                    pol = False
+                elif l[0] == b'?'[0]:
+                    a.askZ3()
+                elif l[0] == b'q'[0]:
+                    exit(0)
+                if inp != None:
+                    suffix = t.add(inp, pol)
+                    inputalph = inputalph.union(inp)
+
+                    print ('asserting %s %s' % (pol, inp))
+
+                    a = Automaker(t, limitS, limitL)
+                    a.setupProblem()
+                    a.set_alphabet(inputalph)
+                    
+                    # print ([ x for x in t.iter() ])
+                    # a.addPath(inp[:-len(suffix)], suffix, pol)
+                
 
     except KeyboardInterrupt as e:
         pass
         raise e
+
