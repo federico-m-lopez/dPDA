@@ -14,6 +14,37 @@ import base64
 import random
 import itertools
 
+###############
+#  Utilities  #
+###############
+
+def unescape(bs):
+    try:
+        result = bs.decode('unicode_escape').encode('latin-1')
+        return result
+    except UnicodeDecodeError as e:
+        print ("error", e)
+        return None
+
+# C'mon, python, seriously?
+class List(list):
+    def __hash__(self):
+        return hash(tuple(self))
+
+# Missing from Z3py:
+def Sequence(name, ctx=None):
+    """Return a sequence constant named `name`. If `ctx=None`, then the global context is used.
+    >>> x = Sequence('x')
+    """
+    ctx = z3.get_ctx(ctx)
+    int_sort = z3.IntSort(ctx)
+    return z3.SeqRef(
+        z3.Z3_mk_const(ctx.ref(),
+                       z3.to_symbol(name, ctx),
+                       z3.SeqSortRef(z3.Z3_mk_seq_sort(int_sort.ctx_ref(), int_sort.ast)).ast),
+        ctx)
+
+
 
 class InfoTrie:
     """
@@ -77,6 +108,7 @@ class Automaton:
     def __init__(self):
         self.QF = set()
         self.D  = dict()
+        self.productive = None
 
     def construct_from_z3_model(self, m, d, Qf, alphabet):
         to_check = [0]
@@ -86,6 +118,7 @@ class Automaton:
         
         self.D  = dict()
         self.QF = set()
+        self.productive = None
         
         print ("m[d]  = %s" %  m[d])
         print ("m[qf] = %s" %  m[Qf])
@@ -139,35 +172,111 @@ class Automaton:
 
         self.symbols = symbols
 
-###############
-#  Utilities  #
-###############
+    def productivity(self):
+        if self.productive == None:
+            self.compute_productivity()
+        return self.productive
 
-def unescape(bs):
-    try:
-        result = bs.decode('unicode_escape').encode('latin-1')
-        return result
-    except UnicodeDecodeError as e:
-        print ("error", e)
-        return None
+    def compute_productivity(self):
+        """
+        Determine for each stack/state symbol whether it leads to QF, or to decreasing length
+        """
+        productive = {'down':set(), 'toqf':set(), 'tononqf':set()}
+        
+        S = set()
+        
+        for k in self.D.keys():
+            S.add(k)
+        down_immediate = set()
+        for s in S:
+            if any(map(lambda x: len(x)<1, self.D.get(s).values())):
+                down_immediate.add(s)
+        toqf_immediate = set()
+        for s in S:
+            if List([s]) in self.QF:
+                toqf_immediate.add(s)
 
-# C'mon, python, seriously?
-class List(list):
-    def __hash__(self):
-        return hash(tuple(self))
+        tononqf_immediate = set()
+        for s in S:
+            if List([s]) not in self.QF:
+                tononqf_immediate.add(s)
+                
+        import copy
+        eqs = copy.deepcopy(self.D)
+        changed = True # iterate until no more changes
+        down = down_immediate.copy()
+        toqf = toqf_immediate.copy()
+        tononqf = tononqf_immediate.copy()
 
-# Missing from Z3py:
-def Sequence(name, ctx=None):
-    """Return a sequence constant named `name`. If `ctx=None`, then the global context is used.
-    >>> x = Sequence('x')
-    """
-    ctx = z3.get_ctx(ctx)
-    int_sort = z3.IntSort(ctx)
-    return z3.SeqRef(
-        z3.Z3_mk_const(ctx.ref(),
-                       z3.to_symbol(name, ctx),
-                       z3.SeqSortRef(z3.Z3_mk_seq_sort(int_sort.ctx_ref(), int_sort.ast)).ast),
-        ctx)
+        while changed:
+            changed = False
+            for s in eqs.keys():
+                for (k,v) in eqs[s].items():
+                    new = List(filter(lambda x: x not in down, eqs[s][k]))
+                    if eqs[s][k] != new:
+                        changed = True
+                    eqs[s][k] = new
+                    if new == []:
+                        down.add(s)
+
+                    if len(v) == 1 and v[0] in toqf and s not in toqf:
+                        toqf.add(s)
+                        changed = True
+
+                    if len(v) == 1 and v[0] in tononqf and s not in tononqf:
+                        tononqf.add(s)
+                        changed = True
+
+                    if len(v) > 1 and s not in tononqf:
+                        tononqf.add(s)
+                        changed = True
+
+        productive['down'] = down
+        productive['toqf'] = toqf
+        productive['tononqf'] = tononqf
+        self.productive = productive # cache
+        return productive
+
+
+    def enumerate_words(self, alphabet, configurations_prefixes={List([0]) : {b''}}, mode = 'words'):
+        """
+        Short-Lex enumeration of L (or \Sigma^\ast - L),
+        @param trie exclude these words
+        """
+        # print("enumerate on |alph|=%d configurations_prefixes %s" % (len(alphabet), configurations_prefixes))
+
+        successors = {}
+
+        productive = self.productivity()
+
+        for (configuration, prefixes) in configurations_prefixes.items():
+            
+            # final and empty
+            if len(configuration) == 0:
+                yield from prefixes
+                
+            else:
+                # final without being empty - the show can go on
+                if len(configuration) == 1 and configuration in self.QF:
+                    yield from prefixes
+                # otherwise, it goes on anyway but the word is not yielded.
+                
+                # detect empty languages
+                if not configuration[-1] in productive["down"]:
+                   if not (len(configuration)==1 and configuration[-1] in productive["toqf"]):
+                     continue
+                 
+                # compute next layer
+                dmap = self.D.get(configuration[-1])
+                if dmap != None:
+                    for (a, stack_suffix) in dmap.items():
+                        newstack = List(configuration[:-1] + stack_suffix)
+                        for prefix in prefixes:
+                            successors.setdefault(newstack, set()).add(b"%s%s" % (prefix, bytes([a])))
+
+        if len(successors):
+            yield from self.enumerate_words(alphabet, successors, mode)
+            
 
 
 class Automaker:
@@ -304,10 +413,7 @@ class Automaker:
         return self.automaton
 
     def enumerate_words_t(self, alphabet, prefix=b'', configuration = List([0]), mode = 'words'):
-        try:
-            yield from self.automaton.enumerate_words(alphabet, prefix, configuration, mode, productive=None, trie=self.t)
-        except StopIteration:
-            return
+        yield from self.automaton.enumerate_words(alphabet, {configuration : {prefix}}, mode)
 
 
 ################
@@ -366,9 +472,9 @@ if __name__=='__main__':
         t = InfoTrie()
 
         # arbitrarily limit number of state/stack symbols
-        limitS = 2
+        limitS = 6
         # arbitrarily limit length of suffix added in any stack operation
-        limitL = 3
+        limitL = 2
 
         # limit search to the observed input alphabet
         inputalph = set()
@@ -398,17 +504,42 @@ if __name__=='__main__':
 
             for l in fileinput.input(files, mode='rb'):
                 inp = None
-                # positive example:
+                
+                # assert a positive example:
                 if l[0] == b'p'[0] or l[0] == b'y'[0]:
                     inp = unescape(l[2:-1])
                     pol = True
+                    
+                # assert a negative example:
                 elif l[0] == b'n'[0] or l[0] == b'n'[0]:
                     inp = unescape(l[2:-1])
                     pol = False
+  
+                # query
                 elif l[0] == b'?'[0]:
+                    print ("asking Z3")
                     a.askZ3()
+                    
+                    # ...
+                    # print(a.automaton.D)
+                    # print(a.automaton.QF)
+
+                    checkalph = List(inputalph)
+                    print ("here's some words (alphabet %s)" % checkalph)
+                    try:
+                        en = a.enumerate_words_t(checkalph, b"")
+                        for w in itertools.islice(en, 0, 14):
+                            print (w)
+                    except StopIteration:
+                        print ("oops, language is not infinite")
+                    except RecursionError:
+                        print ("RecursionError (this is a bug)")
+
+                # quit
                 elif l[0] == b'q'[0]:
                     exit(0)
+                
+                # process input in case of assertion
                 if inp != None:
                     suffix = t.add(inp, pol)
                     inputalph = inputalph.union(inp)
@@ -418,9 +549,6 @@ if __name__=='__main__':
                     a = Automaker(t, limitS, limitL)
                     a.setupProblem()
                     a.set_alphabet(inputalph)
-                    
-                    # print ([ x for x in t.iter() ])
-                    # a.addPath(inp[:-len(suffix)], suffix, pol)
                 
 
     except KeyboardInterrupt as e:
