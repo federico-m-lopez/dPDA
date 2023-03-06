@@ -1,5 +1,5 @@
-01
-0011
-000111
-00001111
-0000011111
+ab
+aabb
+aaabbb
+aaaabbbbb
+aaaaabbbbb
